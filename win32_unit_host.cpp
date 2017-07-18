@@ -52,8 +52,8 @@ static ProgramPath win32_get_program_path(char *buffer, size_t buffer_size);
 
 typedef void(print_hello_fn)(void);
 
-static void ui_module_load(UIModule *);
-static void ui_module_refresh(UIModule *);
+static bool ui_module_load(UIModule *);
+static bool ui_module_refresh(UIModule *);
 static uint64_t now_micros();
 static uint64_t global_qpc_origin;
 static uint64_t global_qpf_hz;
@@ -184,8 +184,10 @@ int WINAPI WinMain(void *, void *, char *argv, int)
             bgfx::dbgTextClear();
         }
 
+        if (ui_module_refresh(&ui_module)) {
+            ui.outdated_frames_n = std::max(1, ui.outdated_frames_n);
+        }
         int host_outdated_frames_n = ui.outdated_frames_n; // or not
-        ui_module_refresh(&ui_module);
         if (ui_module.vtable_0.update) {
             Ui module_ui = {0};
             /* UI init */ {
@@ -245,7 +247,7 @@ int WINAPI WinMain(void *, void *, char *argv, int)
     return 0;
 }
 
-static void ui_module_load(UIModule *module_)
+static bool ui_module_load(UIModule *module_)
 {
     auto &module = *module_;
     win32_reloadable_modules::ReloadAttemptResultDetails load_details;
@@ -253,7 +255,7 @@ static void ui_module_load(UIModule *module_)
         win32_reloadable_modules::load(&module.win32_module, &load_details);
     if (result == win32_reloadable_modules::ReloadAttemptResult::Unloaded) {
         module.vtable_0 = {0};
-        return;
+        return false;
     }
 
     ui_api_get_vtable_0_fn *get_vtable_0 =
@@ -261,7 +263,10 @@ static void ui_module_load(UIModule *module_)
             GetProcAddress(module.win32_module.dll, "ui_get_vtable_0"));
     if (get_vtable_0) {
         module.vtable_0 = get_vtable_0();
+        return true;
     }
+
+    return false;
 }
 
 #include <cstdarg>
@@ -278,12 +283,13 @@ static void trace(char const *pattern, ...)
     }
 }
 
-static void ui_module_refresh(UIModule *module_)
+static bool ui_module_refresh(UIModule *module_)
 {
     auto &module = *module_;
     if (win32_reloadable_modules::has_changed(&module.win32_module)) {
-        ui_module_load(&module);
+        return ui_module_load(&module);
     }
+    return false;
 }
 
 static uint64_t now_micros()

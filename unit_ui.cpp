@@ -83,6 +83,12 @@ static Ui_FontHandle label_font(Ui_Label const &x) { return x.font; }
 static void
 draw_centered_label(int x, int y, int width, int height, Ui_Label const &label);
 
+static void ui_display_invalidate(Ui* ui_)
+{
+    auto &ui = *ui_;
+    ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
+}
+
 // returns true when activated
 static bool button_simple(Ui *ui_,
                           int flags,
@@ -97,16 +103,17 @@ static bool button_simple(Ui *ui_,
     bool input = 0 != (flags & Ui_UpdateFlags_ProcessInputs);
     bool is_on =
         ui.inputs.mouse.left_button.down_p &&
-        aab2_contains(aab2_x_d(x, y, width, height), ui.inputs.mouse.position.x,
+        aab2_contains(aab2_x_d(x, y, width, height),
+                      ui.inputs.mouse.position.x,
                       ui.inputs.mouse.position.y);
-    if (input && (ui.inputs.mouse.left_button.pressed_p ||
-                  ui.inputs.mouse.left_button.released_p)) {
-        ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
-    }
-    if (display)
+    bool transitioned_p = ui.inputs.mouse.left_button.pressed_p ||
+        ui.inputs.mouse.left_button.released_p;
+    if (input && transitioned_p)
+        ui_display_invalidate(&ui);
+    if (display) {
         draw_box_with_border(x, y, width, height, is_on);
-    if (display)
         draw_centered_label(x, y, width, height, label);
+    }
     return is_on;
 }
 
@@ -127,13 +134,36 @@ static bool toggle_simple(Ui *ui_,
         aab2_contains(aab2_x_d(x, y, width, height), ui.inputs.mouse.position.x,
                       ui.inputs.mouse.position.y)) {
         is_on = !is_on;
-        ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
+        ui_display_invalidate(&ui);
     }
-    if (display)
+    if (display) {
         draw_box_with_border(x, y, width, height, is_on);
-    if (display)
         draw_centered_label(x, y, width, height, label);
+    }
     return is_on;
+}
+
+static void advance(Ui_Int2* pos_, Ui_Int2 delta)
+{
+    auto &pos = *pos_;
+    pos.x += delta.x;
+    pos.y += delta.y;
+}
+
+static void catchupx(Ui_Int2* pos_, Ui_Int2 delta, Ui_Int2 target)
+{
+    auto &pos = *pos_;
+    while (pos.x < target.x) {
+        advance(&pos, { delta.x, 0 });
+    }
+}
+
+static void catchupy(Ui_Int2* pos_, Ui_Int2 delta, Ui_Int2 target)
+{
+    auto &pos = *pos_;
+    while (pos.y < target.y) {
+        advance(&pos, { 0, delta.y });
+    }
 }
 
 static void ui_update(Ui *ui_, int flags)
@@ -155,139 +185,162 @@ static void ui_update(Ui *ui_, int flags)
         counter_frame_i = frame_i;
     }
 
-    static int toggle1 = 0;
-    static int toggle2 = 0;
-    static double next_toggle1_ms = frame_ms;
-    static double toggle1_period_ms = 300.0;
-    static bool toggle1_animation_on;
-    static double next_toggle2_ms = next_toggle1_ms - 150.0;
-    static double toggle2_period_ms = 600.0;
-    static bool toggle2_animation_on = true;
+    struct Blinker
+    {
+        double period_ms;
+        bool is_on;
+        int toggle;
+        double next_ms;
+        double error_ms; // measure firing error
+    };
 
-    static double toggle1_error_ms = 0.0;
-    static double toggle2_error_ms = 0.0;
+    static Blinker blinkers[2] = {
+        { 300.0, 0, 0, frame_ms, 0.0 },
+        { 600.0, 0, 0, frame_ms - 150.0, 0.0 },
+    };
 
-    if (toggle1_animation_on && frame_ms >= next_toggle1_ms) {
-        toggle1_error_ms = fabs(next_toggle1_ms - frame_ms);
-        toggle1 ^= 1;
-        ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
-        while (frame_ms >= next_toggle1_ms) {
-            next_toggle1_ms += toggle1_period_ms;
-        }
-    }
-    if (toggle2_animation_on && frame_ms >= next_toggle2_ms) {
-        toggle2_error_ms = fabs(next_toggle2_ms - frame_ms);
-        toggle2 ^= 1;
-        ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
-        while (frame_ms >= next_toggle2_ms) {
-            next_toggle2_ms += toggle2_period_ms;
+    for (auto& blinker : blinkers) {
+        if (blinker.is_on && frame_ms >= blinker.next_ms) {
+            blinker.error_ms = fabs(blinker.next_ms - frame_ms);
+            blinker.toggle ^= 1;
+            while (frame_ms >= blinker.next_ms) {
+                blinker.next_ms += blinker.period_ms;
+            }
+            ui_display_invalidate(&ui);
         }
     }
 
     // try changing the draw code below to see the reloading mechanism work:
-    bool must_display = 0 != (flags & Ui_UpdateFlags_Display);
-    int x_start = 40;
-    int y_start = 40;
-    int x_inc = 90;
+    bool display = 0 != (flags & Ui_UpdateFlags_Display);
+    Ui_Int2 row_cursor = { 40, 40 };
+    Ui_Int2 row_delta { 0, 24 }; // rhythm for the rows
 
-    if (must_display)
+    auto* cursor = &row_cursor;
+    if (display)
         draw_centered_label(
-            x_start, y_start, ui.display.size_px.x, 16,
+            cursor->x, cursor->y, ui.display.size_px.x, 16,
             label_makef_temp("Pressing Q will quit the application."));
-    y_start += 20;
-    if (must_display)
+    advance(cursor, row_delta);
+    if (display)
         draw_centered_label(
-            x_start, y_start, ui.display.size_px.x, 16,
+            cursor->x, cursor->y, ui.display.size_px.x, 16,
             label_makef_temp("Pressing D will show debug info."));
-    y_start += 20;
-    y_start += 20;
+    advance(cursor, row_delta);
+    advance(cursor, row_delta);
 
-    int saved_x_start = x_start;
-    int button_i = 0;
-    for (int n = 8; n--;) {
-        bool pressed = button_simple(&ui, flags, x_start, y_start, 80, 80,
-                                     label_makef_temp("%d", button_i++));
-        x_start += x_inc;
+    Ui_Int2 col_delta{ 96, 0 }; // we use a grid layout using 96 width columns
+    {
+        auto tempcursor = *cursor;
+        cursor = &tempcursor;
+
+        int button_i = 0;
+        for (int n = 8; n--;) {
+            bool pressed = button_simple(&ui, flags, cursor->x, cursor->y, 80, 80,
+                                         label_makef_temp("%d", button_i++));
+            advance(cursor, col_delta);
+        }
+        if (display)
+            draw_centered_label(cursor->x, cursor->y, 200, 80,
+                                label_makef_temp("buttons (no-op)"));
+        advance(cursor, { 0, 80 });
+        cursor = &row_cursor;
+        catchupy(cursor, row_delta, tempcursor);
     }
-    if (must_display)
-        draw_centered_label(x_start, y_start, 200, 80,
-                            label_makef_temp("buttons (no-op)"));
-    x_start = saved_x_start;
-    y_start += 90;
 
     /* allow toggling animation on/off */ {
-        bool *toggle_ptrs[] = {&toggle1_animation_on, &toggle2_animation_on};
-        int toggle_i = 0;
-        for (auto const toggle_ptr : toggle_ptrs) {
-            auto &toggle = *toggle_ptr;
-            toggle = toggle_simple(&ui, flags, x_start, y_start, 80, 80,
-                                   label_makef_temp("%d", toggle_i++), toggle);
-            x_start += x_inc;
-        }
-        if (must_display)
-            draw_centered_label(x_start, y_start, 200, 80,
-                                label_makef_temp("toggle animation"));
-    }
-    x_start = saved_x_start;
-    y_start += 90;
+        auto tempcursor = *cursor;
+        cursor = &tempcursor;
 
-    if (must_display)
-        draw_centered_label(x_start, y_start, 80, 20,
-                            label_makef_temp("plonk1"));
-    x_start += 90;
-    if (must_display)
-        draw_centered_label(x_start, y_start, 80, 20,
-                            label_makef_temp("plonk2"));
-    x_start += 90;
-    y_start += 30;
-    x_start = saved_x_start;
-    /* show blink animation */ {
-        int toggles[] = {toggle1, toggle2};
-        for (auto const toggle : toggles) {
-            draw_box_with_border(x_start, y_start, 80, 80, toggle != 0);
-            x_start += 90;
+        int toggle_i = 0;
+        for (auto& blinker : blinkers) {
+            auto &toggle = blinker.is_on;
+            toggle = toggle_simple(&ui, flags, cursor->x, cursor->y, 80, 80,
+                                   label_makef_temp("%d", toggle_i++), toggle);
+            advance(cursor, col_delta);
         }
-        if (must_display)
-            draw_centered_label(x_start, y_start, 200, 80,
-                                label_makef_temp("animation state"));
+        if (display)
+            draw_centered_label(cursor->x, cursor->y, 200, 80,
+                                label_makef_temp("toggle animation"));
+        advance(cursor, { 0, 80 });
+        cursor = &row_cursor;
+        catchupy(cursor, row_delta, tempcursor);
     }
-    x_start = saved_x_start;
-    y_start += 90;
+
+    {
+        auto tempcursor = *cursor;
+        cursor = &tempcursor;
+        if (display)
+            draw_centered_label(cursor->x, cursor->y, 80, 20,
+                                label_makef_temp("plonk1"));
+        advance(cursor, col_delta);
+        if (display)
+            draw_centered_label(cursor->x, cursor->y, 80, 20,
+                                label_makef_temp("plonk2"));
+        advance(cursor, col_delta);
+        advance(cursor, { 0, 20 });
+        cursor = &row_cursor;
+        catchupy(cursor, row_delta, tempcursor);
+    }
+
+    /* show blink animation */ {
+        auto tempcursor = *cursor;
+        cursor = &tempcursor;
+
+        for (auto const& blinker : blinkers) {
+            bool toggle = blinker.toggle != 0;
+            draw_box_with_border(cursor->x, cursor->y, 80, 80, toggle);
+            advance(cursor, col_delta);
+        }
+        if (display)
+            draw_centered_label(cursor->x, cursor->y, 200, 80,
+                                label_makef_temp("animation state"));
+        advance(cursor, { 0, 80 });
+        cursor = &row_cursor;
+        catchupy(cursor, row_delta, tempcursor);
+    }
 
     static bool debug_text_shown;
     debug_text_shown =
-        toggle_simple(&ui, flags, x_start, y_start, 140, 40,
+        toggle_simple(&ui, flags, cursor->x, cursor->y, 140, 40,
                       label_makef_temp("debug text"), debug_text_shown);
-    if (must_display && debug_text_shown) {
-        int row = y_start / 14;
-        bgfx_dbg_text_printf(0, row++, 0x0f, "Hello!");
+    advance(cursor, { 0, 40 });
+    advance(cursor, row_delta);
+
+    if (display && debug_text_shown) {
+        int row = cursor->y / 14;
+        bgfx_dbg_text_printf(0, row++, 0x0f,
+                             "Frame: %f (ms) %d (count) "
+                             "%d (updates w/o invalidation)",
+                             frame_ms, frame_i, counter);
         bgfx_dbg_text_printf(0, row++, 0x0f, "Display size: %d x %d%s",
                              ui.display.size_px.x, ui.display.size_px.y,
                              ui.display.resized_p ? " resizing" : "");
-        bgfx_dbg_text_printf(0, row++, 0x0f, "The mouse is at %d %d",
+        bgfx_dbg_text_printf(0, row++, 0x0f, "Mouse at %d %d",
                              ui.inputs.mouse.position.x,
                              ui.inputs.mouse.position.y);
-        if (ui.inputs.mouse.left_button.down_p) {
-            bgfx_dbg_text_printf(0, row++, 0x0f, "And the user is pressing it");
+        bgfx_dbg_text_printf(0, row++, 0x0f, "Left button: %s",
+                             ui.inputs.mouse.left_button.down_p?
+                             "down":"up");
+        {
+            int blinker_i = 0;
+            for (auto const& blinker : blinkers) {
+                bgfx_dbg_text_printf(4, row++,
+                                     blinker.toggle ? 0x1f : 0x0f,
+                                     "Plonk%d %f (remaining ms) %f (firing error ms)",
+                                     blinker_i,
+                                     blinker.next_ms - frame_ms,
+                                     blinker.error_ms);
+                ++blinker_i;
+            }
         }
-        bgfx_dbg_text_printf(4, row++, 0x0f, "now: %f %d %d", frame_ms, frame_i,
-                             counter);
-        bgfx_dbg_text_printf(4, row++, toggle1 ? 0x1f : 0x0f, "Plonk1 %f %f",
-                             next_toggle1_ms, toggle1_error_ms);
-        bgfx_dbg_text_printf(4, row++, toggle2 ? 0x1f : 0x0f, "Plonk2 %f %f",
-                             next_toggle2_ms, toggle2_error_ms);
     }
 
     // Output
-    if (ui.inputs.mouse.left_button.pressed_p ||
-        ui.inputs.mouse.left_button.released_p) {
-        ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
-    }
-    if (toggle1_animation_on) {
-        ui.validity_ms = std::min(ui.validity_ms, next_toggle1_ms - frame_ms);
-    }
-    if (toggle2_animation_on) {
-        ui.validity_ms = std::min(ui.validity_ms, next_toggle2_ms - frame_ms);
+    for (auto const& blinker : blinkers) {
+        if (blinker.is_on) {
+            ui.validity_ms = std::min(
+                ui.validity_ms, blinker.next_ms - frame_ms);
+        }
     }
 
     // Internal state management

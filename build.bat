@@ -73,7 +73,8 @@ REM we use an import library (/imblib) to allow
 REM ui modules to import symbols from the host
 
 %CL_EXE% /c /Fo%IntermediateOutputDir%\ui_api.obj ^
-  unit_ui_api.c ^
+  tests\unit_ui_api.c ^
+  /I. ^
   %ClCommonFlags%
 
 REM # Build the host
