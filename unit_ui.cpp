@@ -25,8 +25,24 @@ extern "C" {
 static char temp_arena_buffer[16 * 1024 * 1024];
 static MemoryArena temp_arena = {temp_arena_buffer, sizeof temp_arena_buffer};
 
+struct RenderCommandList;
+
+static RenderCommandList* dummy_render_command_list();
+
 static void
-draw_box_with_border(int x, int y, int width, int height, bool alt_color);
+PushBoxWithBorder(
+    RenderCommandList*,
+    double x, double y, double width, double height,
+    double border,
+    uint32_t fill_argb,
+    uint32_t border_argb);
+
+static void
+PushText(
+    RenderCommandList*,
+    char const* text_first, size_t text_n,
+    int font_id,
+    double x, double y);
 
 // NOTE(nil): TODO(nil):
 // Use of static below for function local state is not safe when reloading the
@@ -62,11 +78,6 @@ struct Ui_FontHandle {
 static Ui_FontHandle fallback_font_en_US();
 static Ui_Int2 get_string_extent(Ui_String const &string,
                                  Ui_FontHandle const &font);
-static void draw_string_at(int x,
-                           int y,
-                           AAB2 clipbox,
-                           Ui_String const &string,
-                           Ui_FontHandle const &font);
 
 // text shown to users in the interface (has to be internationalized, is styled,
 // etc..)
@@ -81,7 +92,7 @@ static Ui_String label_string(Ui_Label const &x) { return x.string; }
 static Ui_FontHandle label_font(Ui_Label const &x) { return x.font; }
 
 static void
-draw_centered_label(int x, int y, int width, int height, Ui_Label const &label);
+draw_centered_label(RenderCommandList*, int x, int y, int width, int height, Ui_Label const &label);
 
 static void ui_display_invalidate(Ui* ui_)
 {
@@ -89,8 +100,12 @@ static void ui_display_invalidate(Ui* ui_)
     ui.outdated_frames_n = std::max(ui.outdated_frames_n, 1);
 }
 
+static void
+draw_box_with_border(RenderCommandList*, int x, int y, int width, int height, bool alt_color);
+
 // returns true when activated
 static bool button_simple(Ui *ui_,
+                          RenderCommandList* rcl,
                           int flags,
                           int x,
                           int y,
@@ -111,14 +126,15 @@ static bool button_simple(Ui *ui_,
     if (input && transitioned_p)
         ui_display_invalidate(&ui);
     if (display) {
-        draw_box_with_border(x, y, width, height, is_on);
-        draw_centered_label(x, y, width, height, label);
+        draw_box_with_border(rcl, x, y, width, height, is_on);
+        draw_centered_label(rcl, x, y, width, height, label);
     }
     return is_on;
 }
 
 // returns the new toggle value
 static bool toggle_simple(Ui *ui_,
+                          RenderCommandList* rcl,
                           int flags,
                           int x,
                           int y,
@@ -137,8 +153,8 @@ static bool toggle_simple(Ui *ui_,
         ui_display_invalidate(&ui);
     }
     if (display) {
-        draw_box_with_border(x, y, width, height, is_on);
-        draw_centered_label(x, y, width, height, label);
+        draw_box_with_border(rcl, x, y, width, height, is_on);
+        draw_centered_label(rcl, x, y, width, height, label);
     }
     return is_on;
 }
@@ -179,6 +195,7 @@ static void ui_update(Ui *ui_, int flags)
 
     static int counter = 0;
     static int counter_frame_i = frame_i;
+    RenderCommandList* rcl = dummy_render_command_list();
 
     if (frame_i != counter_frame_i) {
         counter = 0;
@@ -218,11 +235,13 @@ static void ui_update(Ui *ui_, int flags)
     auto* cursor = &row_cursor;
     if (display)
         draw_centered_label(
+            rcl,
             cursor->x, cursor->y, ui.display.size_px.x, 16,
             label_makef_temp("Pressing Q will quit the application."));
     advance(cursor, row_delta);
     if (display)
         draw_centered_label(
+            rcl,
             cursor->x, cursor->y, ui.display.size_px.x, 16,
             label_makef_temp("Pressing D will show debug info."));
     advance(cursor, row_delta);
@@ -235,12 +254,12 @@ static void ui_update(Ui *ui_, int flags)
 
         int button_i = 0;
         for (int n = 8; n--;) {
-            bool pressed = button_simple(&ui, flags, cursor->x, cursor->y, 80, 80,
+            bool pressed = button_simple(&ui, rcl, flags, cursor->x, cursor->y, 80, 80,
                                          label_makef_temp("%d", button_i++));
             advance(cursor, col_delta);
         }
         if (display)
-            draw_centered_label(cursor->x, cursor->y, 200, 80,
+            draw_centered_label(rcl, cursor->x, cursor->y, 200, 80,
                                 label_makef_temp("buttons (no-op)"));
         advance(cursor, { 0, 80 });
         cursor = &row_cursor;
@@ -254,12 +273,12 @@ static void ui_update(Ui *ui_, int flags)
         int toggle_i = 0;
         for (auto& blinker : blinkers) {
             auto &toggle = blinker.is_on;
-            toggle = toggle_simple(&ui, flags, cursor->x, cursor->y, 80, 80,
+            toggle = toggle_simple(&ui, rcl, flags, cursor->x, cursor->y, 80, 80,
                                    label_makef_temp("%d", toggle_i++), toggle);
             advance(cursor, col_delta);
         }
         if (display)
-            draw_centered_label(cursor->x, cursor->y, 200, 80,
+            draw_centered_label(rcl, cursor->x, cursor->y, 200, 80,
                                 label_makef_temp("toggle animation"));
         advance(cursor, { 0, 80 });
         cursor = &row_cursor;
@@ -270,11 +289,11 @@ static void ui_update(Ui *ui_, int flags)
         auto tempcursor = *cursor;
         cursor = &tempcursor;
         if (display)
-            draw_centered_label(cursor->x, cursor->y, 80, 20,
+            draw_centered_label(rcl, cursor->x, cursor->y, 80, 20,
                                 label_makef_temp("plonk1"));
         advance(cursor, col_delta);
         if (display)
-            draw_centered_label(cursor->x, cursor->y, 80, 20,
+            draw_centered_label(rcl, cursor->x, cursor->y, 80, 20,
                                 label_makef_temp("plonk2"));
         advance(cursor, col_delta);
         advance(cursor, { 0, 20 });
@@ -288,11 +307,11 @@ static void ui_update(Ui *ui_, int flags)
 
         for (auto const& blinker : blinkers) {
             bool toggle = blinker.toggle != 0;
-            draw_box_with_border(cursor->x, cursor->y, 80, 80, toggle);
+            draw_box_with_border(rcl, cursor->x, cursor->y, 80, 80, toggle);
             advance(cursor, col_delta);
         }
         if (display)
-            draw_centered_label(cursor->x, cursor->y, 200, 80,
+            draw_centered_label(rcl, cursor->x, cursor->y, 200, 80,
                                 label_makef_temp("animation state"));
         advance(cursor, { 0, 80 });
         cursor = &row_cursor;
@@ -301,7 +320,7 @@ static void ui_update(Ui *ui_, int flags)
 
     static bool debug_text_shown;
     debug_text_shown =
-        toggle_simple(&ui, flags, cursor->x, cursor->y, 140, 40,
+        toggle_simple(&ui, rcl, flags, cursor->x, cursor->y, 140, 40,
                       label_makef_temp("debug text"), debug_text_shown);
     advance(cursor, { 0, 40 });
     advance(cursor, row_delta);
@@ -459,7 +478,8 @@ static Ui_Int2 get_string_extent(Ui_String const &string,
     return result;
 }
 
-static void draw_string_at(int x,
+static void draw_string_at(RenderCommandList* rcl,
+                           int x,
                            int y,
                            AAB2 clipbox,
                            Ui_String const &string,
@@ -612,18 +632,19 @@ static Ui_Int2 label_extent(Ui_Label const &x)
 }
 
 static void
-draw_centered_label(int x, int y, int width, int height, Ui_Label const &label)
+draw_centered_label(RenderCommandList* rcl, int x, int y, int width, int height, Ui_Label const &label)
 {
     auto extent = label_extent(label);
     int label_x = int(x + (width - extent.x) / 2.0);
     int label_y = int(y + (height - extent.y) / 2.0 + extent.y /* baseline */);
-    draw_string_at(label_x, label_y, aab2_x_d(x, y, width, height),
+    draw_string_at(rcl, label_x, label_y, aab2_x_d(x, y, width, height),
                    label_string(label), label_font(label));
 };
 
 static void
-draw_box_with_border(int x, int y, int width, int height, bool alt_color)
+draw_box_with_border(RenderCommandList* rcl, int x, int y, int width, int height, bool alt_color)
 {
+    PushBoxWithBorder(rcl, x, y, width, height, 4, alt_color? 0xFFB532:0xB4B4B4, 0x646464);
     static bool has_init;
     static bgfx_vertex_decl box_vertex_decl;
     static bgfx_index_buffer_handle box_ib;
@@ -707,6 +728,79 @@ draw_box_with_border(int x, int y, int width, int height, bool alt_color)
     bgfx_set_state(0 | BGFX_STATE_PT_TRISTRIP | BGFX_STATE_RGB_WRITE, 0);
 
     bgfx_submit(/*view*/ 0, box_program, 0, !NamedTrue(PreserveState));
+}
+
+#include <vector>
+
+enum RenderCommandQuadType
+{
+    RenderCommandQuadType_Box,
+    RenderCommandQuadType_Textured,
+};
+
+struct RenderCommandQuad
+{
+    double x, y, w, h;
+    RenderCommandQuadType type;
+    uint32_t attributes_id;
+};
+
+struct RenderCommandBoxAttributes
+{
+    double border;
+    uint32_t fill_argb;
+    uint32_t border_argb;
+};
+
+struct RenderCommandTexturedAttributes
+{
+    double u0, v0, u1, v1;
+};
+
+struct RenderCommandListStats
+{
+    size_t primitives_n;
+};
+
+struct RenderCommandList
+{
+    MemoryArena heap;
+    std::vector<RenderCommandQuad> quads;
+    RenderCommandListStats stats;
+};
+
+RenderCommandList* dummy_render_command_list()
+{
+    static RenderCommandListStats stats;
+    static RenderCommandList instance;
+    stats.primitives_n = std::max(stats.primitives_n, instance.stats.primitives_n);
+    instance = {}; // reset
+    return &instance;
+}
+
+static void
+PushBoxWithBorder(
+RenderCommandList* rcl_,
+double x, double y, double width, double height,
+double border,
+uint32_t fill_argb,
+uint32_t border_argb)
+{
+    RenderCommandList& rcl = *rcl_;
+    rcl.stats.primitives_n += 1;
+    // TODO(nil): implement
+}
+
+static void
+PushText(
+    RenderCommandList* rcl_,
+    char const* text_first, size_t text_n,
+    int font_id,
+    double x, double y)
+{
+    RenderCommandList& rcl = *rcl_;
+    rcl.stats.primitives_n += 1;
+    // TODO(nil): implement
 }
 
 #include "memory.cpp"
